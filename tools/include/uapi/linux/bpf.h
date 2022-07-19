@@ -5330,6 +5330,26 @@ union bpf_attr {
  *		**-EACCES** if the SYN cookie is not valid.
  *
  *		**-EPROTONOSUPPORT** if CONFIG_IPV6 is not builtin.
+ *
+ * int bpf_skb_packet_hash(struct sk_buff *skb, struct bpf_packet_hash_params *params, void *hash, u32 len)
+ *	Description
+ *		Hash the packet data based on the paramters set in *params*.
+ *		The hash will be set in *hash*. The value of *len* will be
+ *		dependent on the hash algorithm.
+ *		Currently only crc32c is supported.
+ *
+ *	Return
+ *		0 on success, or negative errno if there is an error.
+ *
+ * int bpf_xdp_packet_hash(struct xdp_buff *xdp, struct bpf_packet_hash_params *params, void *hash, u32 len)
+ *	Description
+ *		Hash the packet data based on the paramters set in *params*.
+ *		The hash will be set in *hash*. The value of *len* will be
+ *		dependent on the hash algorithm.
+ *		Currently only crc32c is supported.
+ *
+ *	Return
+ *		0 on success, or negative errno if there is an error.
  */
 #define __BPF_FUNC_MAPPER(FN)		\
 	FN(unspec),			\
@@ -5540,6 +5560,8 @@ union bpf_attr {
 	FN(tcp_raw_gen_syncookie_ipv6),	\
 	FN(tcp_raw_check_syncookie_ipv4),	\
 	FN(tcp_raw_check_syncookie_ipv6),	\
+	FN(skb_packet_hash),		\
+	FN(xdp_packet_hash),		\
 	/* */
 
 /* integer value in 'imm' field of BPF_CALL instruction selects which helper
@@ -6845,6 +6867,18 @@ struct bpf_core_relo {
 	__u32 type_id;
 	__u32 access_str_off;
 	enum bpf_core_relo_kind kind;
+};
+
+enum bpf_hash {
+	BPF_HASH_UNSPEC = 0,
+	BPF_CRC32C,
+};
+
+struct bpf_packet_hash_params {
+	enum bpf_hash hash;
+	__u32 initial;	/* initial value of the hash */
+	__u32 offset;	/* packet offset */
+	__u32 len;	/* length of the packet to hash. */
 };
 
 #endif /* _UAPI__LINUX_BPF_H__ */

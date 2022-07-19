@@ -79,6 +79,8 @@
 #include <net/tls.h>
 #include <net/xdp.h>
 #include <net/mptcp.h>
+#include <linux/crc32c.h>
+#include <linux/crc32.h>
 
 static const struct bpf_func_proto *
 bpf_sk_base_func_proto(enum bpf_func_id func_id);
@@ -2077,6 +2079,63 @@ static const struct bpf_func_proto bpf_csum_level_proto = {
 	.ret_type	= RET_INTEGER,
 	.arg1_type	= ARG_PTR_TO_CTX,
 	.arg2_type	= ARG_ANYTHING,
+};
+
+static inline __wsum crc32c_csum_update(const void *buff, int len, __wsum sum)
+{
+	/* This uses the crypto implementation of crc32c, which is either
+	 * implemented w/ hardware support or resolves to __crc32c_le().
+	 */
+	return (__force __wsum)crc32c((__force __u32)sum, buff, len);
+}
+
+static inline __wsum crc32c_csum_combine(__wsum csum, __wsum csum2,
+				       int offset, int len)
+{
+	return (__force __wsum)__crc32c_le_combine((__force __u32)csum,
+						   (__force __u32)csum2, len);
+}
+
+static const struct skb_checksum_ops crc32c_csum_ops = {
+	.update  = crc32c_csum_update,
+	.combine = crc32c_csum_combine,
+};
+
+
+BPF_CALL_4(bpf_skb_packet_hash, struct sk_buff*, skb, struct bpf_packet_hash_params*, params, void*, hash, __u32, len)
+{
+	if (unlikely(!params || !hash))
+		return -EINVAL;
+	if (unlikely(params->offset > 0xffff || params->offset & 1))
+		return -EFAULT;
+	if (unlikely(params->hash == BPF_HASH_UNSPEC))
+		return -EINVAL;
+	if (unlikely(params->offset + params->len > skb->len))
+		return -ERANGE;
+	switch (params->hash) {
+	case BPF_CRC32C: {
+		__wsum crc;
+		if (len != 4)
+			return -EINVAL;
+		// use skb_checksum to properly handle dealing with nonlinear skbs.
+		crc = __skb_checksum(skb, params->offset, params->len, params->initial, &crc32c_csum_ops);
+		*(__u32*)hash = crc;
+		break;
+	}
+	default:
+		return -EINVAL;
+	}
+	return 0;
+}
+static const struct bpf_func_proto bpf_skb_packet_hash_proto = {
+	.func		= bpf_skb_packet_hash,
+	.gpl_only	= true,
+	.pkt_access	= true,
+	.ret_type	= RET_INTEGER,
+	.arg1_type	= ARG_PTR_TO_CTX,
+	.arg2_type	= ARG_PTR_TO_STACK,
+	.arg3_type	= ARG_PTR_TO_MEM,
+	.arg4_type	= ARG_CONST_SIZE,
 };
 
 static inline int __bpf_rx_skb(struct net_device *dev, struct sk_buff *skb)
@@ -4101,6 +4160,42 @@ static const struct bpf_func_proto bpf_xdp_adjust_meta_proto = {
 	.arg1_type	= ARG_PTR_TO_CTX,
 	.arg2_type	= ARG_ANYTHING,
 };
+
+BPF_CALL_4(bpf_xdp_packet_hash, struct xdp_buff*, xdp, struct bpf_packet_hash_params*, params, void*, hash, __u32, len)
+{
+	if (unlikely(!params || !hash))
+		return -EINVAL;
+	if (unlikely(params->offset > 0xffff || params->offset & 1))
+		return -EFAULT;
+	if (unlikely(params->hash == BPF_HASH_UNSPEC))
+		return -EINVAL;
+	if (unlikely(params->offset + params->len > xdp->data_end - xdp->data))
+		return -ERANGE;
+	switch (params->hash) {
+	case BPF_CRC32C: {
+		__wsum crc;
+		if (len != 4)
+			return -EINVAL;
+		crc = crc32c(params->initial, xdp->data + params->offset, params->len);
+		*(__u32*)hash = crc;
+		break;
+	}
+	default:
+		return -ENOTSUPP;
+	}
+	return 0;
+}
+static const struct bpf_func_proto bpf_xdp_packet_hash_proto = {
+	.func		= bpf_xdp_packet_hash,
+	.gpl_only	= true,
+	.pkt_access	= true,
+	.ret_type	= RET_INTEGER,
+	.arg1_type	= ARG_PTR_TO_CTX,
+	.arg2_type	= ARG_PTR_TO_STACK,
+	.arg3_type	= ARG_PTR_TO_MEM,
+	.arg4_type	= ARG_CONST_SIZE,
+};
+
 
 /* XDP_REDIRECT works by a three-step process, implemented in the functions
  * below:
@@ -7942,6 +8037,8 @@ tc_cls_act_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 		return &bpf_sk_storage_get_proto;
 	case BPF_FUNC_sk_storage_delete:
 		return &bpf_sk_storage_delete_proto;
+	case BPF_FUNC_skb_packet_hash:
+		return &bpf_skb_packet_hash_proto;
 #ifdef CONFIG_XFRM
 	case BPF_FUNC_skb_get_xfrm_state:
 		return &bpf_skb_get_xfrm_state_proto;
@@ -8025,6 +8122,8 @@ xdp_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 		return &bpf_xdp_fib_lookup_proto;
 	case BPF_FUNC_check_mtu:
 		return &bpf_xdp_check_mtu_proto;
+	case BPF_FUNC_xdp_packet_hash:
+		return &bpf_xdp_packet_hash_proto;
 #ifdef CONFIG_INET
 	case BPF_FUNC_sk_lookup_udp:
 		return &bpf_xdp_sk_lookup_udp_proto;
